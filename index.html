@@ -1137,7 +1137,18 @@ html, body {
       // Base concrete tone — warm grey, sits between the bone palette and a true concrete.
       ctx.fillStyle = '#bcb09a';
       ctx.fillRect(0, 0, SIZE, SIZE);
-      applyNoise(ctx, 22);
+      // Noise grain — inlined rather than calling applyNoise(), because that helper
+      // reads TEX_PX (a const declared further down in the IIFE) and this function
+      // runs eagerly during ground-mesh setup, before that const is initialized.
+      const img = ctx.getImageData(0, 0, SIZE, SIZE);
+      const d = img.data;
+      for (let i = 0; i < d.length; i += 4) {
+        const n = (Math.random() - 0.5) * 22;
+        d[i]   = Math.max(0, Math.min(255, d[i]   + n));
+        d[i+1] = Math.max(0, Math.min(255, d[i+1] + n));
+        d[i+2] = Math.max(0, Math.min(255, d[i+2] + n));
+      }
+      ctx.putImageData(img, 0, 0);
 
       // Darker discoloration patches — water stains, oil, age.
       for (let i = 0; i < 6; i++) {
