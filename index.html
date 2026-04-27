@@ -617,9 +617,14 @@ html, body {
     scene.add(sun);
     scene.add(new THREE.HemisphereLight(0xffe2b4, 0xb09a78, 0.35));
 
+    // Ground plane carries the sidewalk texture. ~4m physical tile across a 3000m plane
+    // = 750 repeats, which keeps cracks/seams readable from typical camera distances
+    // without dominating the silhouette of buildings sitting on top.
+    const groundTex = makeSidewalkTexture();
+    groundTex.repeat.set(750, 750);
     const ground = new THREE.Mesh(
       new THREE.PlaneGeometry(3000, 3000),
-      new THREE.MeshLambertMaterial({ color: 0xebe1c6 })
+      new THREE.MeshLambertMaterial({ map: groundTex })
     );
     ground.rotation.x = -Math.PI / 2;
     ground.position.y = -0.02;
@@ -1118,6 +1123,65 @@ html, body {
         ? renderer.capabilities.getMaxAnisotropy() : 1;
       tex.needsUpdate = true;
       return tex;
+    }
+
+    // Sidewalk: stylized CDMX concrete pavement. Tiled across the entire ground plane,
+    // so it shows wherever roads/parks/buildings don't cover. Cracks are drawn as small
+    // branching paths to evoke earthquake damage rather than uniform wear.
+    function makeSidewalkTexture() {
+      const SIZE = 256;
+      const c = document.createElement('canvas');
+      c.width = SIZE; c.height = SIZE;
+      const ctx = c.getContext('2d');
+
+      // Base concrete tone — warm grey, sits between the bone palette and a true concrete.
+      ctx.fillStyle = '#bcb09a';
+      ctx.fillRect(0, 0, SIZE, SIZE);
+      applyNoise(ctx, 22);
+
+      // Darker discoloration patches — water stains, oil, age.
+      for (let i = 0; i < 6; i++) {
+        const x = Math.random() * SIZE;
+        const y = Math.random() * SIZE;
+        const r = 18 + Math.random() * 32;
+        const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
+        grad.addColorStop(0, 'rgba(70, 56, 42, 0.11)');
+        grad.addColorStop(1, 'rgba(70, 56, 42, 0)');
+        ctx.fillStyle = grad;
+        ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+      }
+
+      // Jagged cracks — each crack has 2–3 branches radiating from a starting point.
+      // Starts are kept away from the edges so the visible seam at tile boundaries
+      // isn't dominated by half-cracks.
+      ctx.strokeStyle = 'rgba(40, 30, 22, 0.55)';
+      ctx.lineWidth = 1.4;
+      ctx.lineCap = 'round';
+      function drawCrack(sx, sy) {
+        const branches = 2 + Math.floor(Math.random() * 2);
+        for (let b = 0; b < branches; b++) {
+          let cx = sx, cy = sy;
+          let angle = Math.random() * Math.PI * 2;
+          const segs = 5 + Math.floor(Math.random() * 5);
+          ctx.beginPath();
+          ctx.moveTo(cx, cy);
+          for (let s = 0; s < segs; s++) {
+            angle += (Math.random() - 0.5) * 1.0;  // wobble
+            const len = 4 + Math.random() * 10;
+            cx += Math.cos(angle) * len;
+            cy += Math.sin(angle) * len;
+            ctx.lineTo(cx, cy);
+          }
+          ctx.stroke();
+        }
+      }
+      const margin = 36;
+      for (let i = 0; i < 5; i++) {
+        drawCrack(margin + Math.random() * (SIZE - 2 * margin),
+                  margin + Math.random() * (SIZE - 2 * margin));
+      }
+
+      return finishTexture(c);
     }
 
     // Lazy texture cache: only generate (material × variant) combos that actually appear.
