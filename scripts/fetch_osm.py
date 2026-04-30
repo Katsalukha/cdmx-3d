@@ -22,6 +22,7 @@ USER_AGENT = "cdmx-3d/1.0 (github.com/anthropics; OSM neighborhood viewer)"
 KEPT_TAGS = {
     "building", "building:levels", "building:material", "height",
     "highway", "name", "leisure", "landuse", "natural", "amenity",
+    "shop", "tourism",
 }
 
 
