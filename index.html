@@ -1439,9 +1439,10 @@ html, body {
     }
 
     // ============ Building archetypes (stylized) ============
-    // Most buildings render as plain extruded polygons. A handful of types get distinctive
-    // primitive geometry on top: religious buildings get a gable + bell tower, hospitals get
-    // a red cross marker. Detection is tag-based; missing tags fall through to the default box.
+    // Most buildings render as plain extruded polygons. Tagged types get distinctive
+    // primitive geometry on top: religious → gable + bell tower; hospital → red roof
+    // cross; school → flagpole + Mexican flag; civic → pediment; retail → striped
+    // awning over the door. Detection falls through to null (default box) on a miss.
     function getArchetype(tags) {
       if (!tags) return null;
       const b = (tags.building || '').toLowerCase();
@@ -1453,6 +1454,15 @@ html, body {
       }
       if (a === 'hospital' || b === 'hospital') {
         return 'hospital';
+      }
+      if (a === 'school') {
+        return 'school';
+      }
+      if (b === 'civic' || a === 'townhall') {
+        return 'civic';
+      }
+      if (b === 'retail' || tags.shop) {
+        return 'retail';
       }
       return null;
     }
@@ -1555,6 +1565,90 @@ html, body {
       return grp;
     }
 
+    // ============ School: flagpole + Mexican flag ============
+    // Slim metal pole rising from the roof centroid with three thin colored boxes
+    // (green / white / red) hanging near the tip — the iconic schoolyard flagpole.
+    const FLAGPOLE_GEOM = new THREE.CylinderGeometry(0.08, 0.08, 7, 8);
+    const FLAGPOLE_MAT  = new THREE.MeshLambertMaterial({ color: 0x8a8a86 });
+    const FLAG_STRIPE_GEOM = new THREE.BoxGeometry(0.55, 1.0, 0.04);
+    const FLAG_GREEN_MAT = new THREE.MeshLambertMaterial({ color: 0x006847 });
+    const FLAG_WHITE_MAT = new THREE.MeshLambertMaterial({ color: 0xf2efe6 });
+    const FLAG_RED_MAT   = new THREE.MeshLambertMaterial({ color: 0xce1126 });
+    const FLAG_STRIPE_MATS = [FLAG_GREEN_MAT, FLAG_WHITE_MAT, FLAG_RED_MAT];
+
+    function makeFlagpole(cx, cz, baseY) {
+      const grp = new THREE.Group();
+      const POLE_H = 7;
+      const pole = new THREE.Mesh(FLAGPOLE_GEOM, FLAGPOLE_MAT);
+      pole.position.set(cx, baseY + POLE_H / 2, cz);
+      pole.castShadow = true;
+      grp.add(pole);
+      const flagY = baseY + POLE_H - 0.7;
+      for (let i = 0; i < 3; i++) {
+        const stripe = new THREE.Mesh(FLAG_STRIPE_GEOM, FLAG_STRIPE_MATS[i]);
+        stripe.position.set(cx + 0.36 + i * 0.55, flagY, cz);
+        stripe.castShadow = true;
+        grp.add(stripe);
+      }
+      return grp;
+    }
+
+    // ============ Civic: triangular pediment ============
+    // Small temple-style gable centered on the building, ridge along the long axis.
+    // Reuses the cap material so per-building tinting also applies to the pediment.
+    function makePediment(obb, baseY, mat) {
+      const W = Math.min(obb.longDim * 0.6, 12);   // along the long axis (extrusion depth)
+      const D = Math.min(obb.shortDim * 0.5, 5);   // triangle base
+      const H = Math.min(D * 0.5, 2.5);            // peak height
+      if (W < 1.5 || D < 1.5 || H < 0.8) return null;
+      const tri = new THREE.Shape();
+      tri.moveTo(-D / 2, 0);
+      tri.lineTo(D / 2, 0);
+      tri.lineTo(0, H);
+      tri.lineTo(-D / 2, 0);
+      const geo = new THREE.ExtrudeGeometry(tri, { depth: W, bevelEnabled: false });
+      geo.translate(0, 0, -W / 2);
+      geo.rotateY(Math.PI / 2 - obb.angle);
+      geo.translate(obb.cx, baseY, obb.cz);
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      return mesh;
+    }
+
+    // ============ Retail: striped awning ============
+    // Tiny canvas texture (4 vertical stripes red/cream) is shared across all awnings
+    // so we only generate it once. The awning is a flat-ish box mounted just above
+    // the door, sticking out from the wall along the door's outward normal.
+    const _awningTex = (() => {
+      const c = document.createElement('canvas');
+      c.width = 32; c.height = 16;
+      const ctx = c.getContext('2d');
+      for (let i = 0; i < 4; i++) {
+        ctx.fillStyle = (i % 2) ? '#f4ece0' : '#c8463a';
+        ctx.fillRect(i * 8, 0, 8, 16);
+      }
+      const tex = new THREE.CanvasTexture(c);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.needsUpdate = true;
+      return tex;
+    })();
+    const AWNING_MAT  = new THREE.MeshLambertMaterial({ map: _awningTex });
+    const AWNING_GEOM = new THREE.BoxGeometry(2.4, 0.35, 1.0);
+
+    function makeAwning(mx, mz, n) {
+      const awning = new THREE.Mesh(AWNING_GEOM, AWNING_MAT);
+      // Door spans y=0 to y=2.10 (centered at 1.05, height 2.1). Sit awning just above.
+      // Push out from the wall by half the awning's depth + a small clearance so the
+      // back face sits flush against the wall and doesn't z-fight.
+      const outOff = 0.52;
+      awning.position.set(mx + n.x * outOff, 2.40, mz + n.z * outOff);
+      awning.rotation.y = Math.atan2(n.x, n.z);
+      awning.castShadow = true;
+      awning.receiveShadow = true;
+      return awning;
+    }
+
     function makeBuilding(coords, height, color, id, materialType, area, tags) {
       try {
         // Detect special archetype that gets distinctive geometry beyond a plain box.
@@ -1614,12 +1708,27 @@ html, body {
           if (tower) group.add(tower);
         }
 
-        // Compute centroid for tinaco / hospital marker placement
+        // Compute centroid for tinaco / hospital / school / civic placement
         let cx = 0, cz = 0;
         for (let i = 0; i < coords.length; i++) { cx += coords[i].x; cz += coords[i].z; }
         cx /= coords.length; cz /= coords.length;
 
-        // Rooftop tinaco — only on plain buildings (skip churches, hospitals — they look wrong with one)
+        // School: flagpole + Mexican flag at the roof centroid.
+        if (archetype === 'school' && height >= 2.5) {
+          group.add(makeFlagpole(cx, cz, height));
+        }
+
+        // Civic: triangular pediment on the centroid, oriented along the long axis.
+        if (archetype === 'civic') {
+          const civicObb = obbFromPolygon(coords);
+          if (civicObb) {
+            const pediment = makePediment(civicObb, height, capMat);
+            if (pediment) group.add(pediment);
+          }
+        }
+
+        // Rooftop tinaco — only on plain buildings (every archetype above replaces the
+        // tinaco with its own roof feature, so the !archetype guard skips them all).
         if (!archetype && (area === undefined || area >= 25) && height >= 4) {
           const offX = (hash2(id, 11) - 0.5) * 1.6;
           const offZ = (hash2(id, 13) - 0.5) * 1.6;
@@ -1658,6 +1767,11 @@ html, body {
             door.rotation.y = Math.atan2(n.x, n.z);
             door.userData.buildingId = id;
             group.add(door);
+
+            // Retail: striped awning right above this door, sharing midpoint + outward normal.
+            if (archetype === 'retail' && height >= 3) {
+              group.add(makeAwning(mx, mz, n));
+            }
           }
         }
 
@@ -2198,8 +2312,10 @@ html, body {
       else if (data.tags.tourism === 'museum') label = 'Museo';
       else if (data.tags.amenity === 'school') label = 'Escuela';
       else if (data.tags.amenity === 'hospital' || _b === 'hospital') label = 'Hospital';
+      else if (_b === 'civic' || data.tags.amenity === 'townhall') label = 'Edificio cívico';
       else if (_b === 'commercial') label = 'Edificio comercial';
       else if (_b === 'retail') label = 'Comercio';
+      else if (data.tags.shop) label = 'Tienda · ' + data.tags.shop;
       else if (_b === 'apartments') label = 'Apartamentos';
       else if (_b === 'house') label = 'Casa';
       else if (_b && _b !== 'yes') label = 'Edificio · ' + _b;

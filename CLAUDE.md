@@ -88,23 +88,20 @@ Tag-detected building categories that get distinctive primitive geometry on top 
 the standard extrusion. Keep low-poly: boxes, cylinders, triangles only — no curves
 beyond cylinders. Reuse the cap material so per-building color tinting still applies.
 
-| archetype  | tag trigger                                                | added geometry                  | status |
-|------------|------------------------------------------------------------|---------------------------------|--------|
-| religious  | `amenity=place_of_worship`, `building=church\|chapel\|...` | gable roof + bell tower + cross | done   |
-| hospital   | `amenity=hospital`, `building=hospital`                    | red rooftop cross               | done   |
-| school     | `amenity=school`                                           | flagpole                        | open   |
-| civic      | `building=civic`, `amenity=townhall`                       | triangular pediment             | open   |
-| retail     | `building=retail`, `shop=*`                                | striped awning over the door    | open   |
+| archetype  | tag trigger                                                | added geometry                       | status |
+|------------|------------------------------------------------------------|--------------------------------------|--------|
+| religious  | `amenity=place_of_worship`, `building=church\|chapel\|...` | gable roof + bell tower + cross      | done   |
+| hospital   | `amenity=hospital`, `building=hospital`                    | red rooftop cross                    | done   |
+| school     | `amenity=school`                                           | flagpole + Mexican flag (green/white/red) | done |
+| civic      | `building=civic`, `amenity=townhall`                       | triangular pediment along long axis  | done   |
+| retail     | `building=retail`, `shop=*`                                | striped red/cream awning over the door | done |
 
 ## Open ideas
 
 - **GLB export**: add an "Exportar GLB" button driving `THREE.GLTFExporter`
   (load from `three@0.128.0/examples/js/exporters/GLTFExporter.js` since r128 doesn't
   bundle it). Should round-trip into Blender with materials intact.
-- **Path B school / civic / retail archetypes** (table above).
 - **Per-building color overrides keyed by OSM ID, persisted across sessions** — would
   let curated color schemes survive reloads (right now overrides are in-memory only).
-- **Tag coverage**: runtime reads `tourism` (museum coloring + label) and `shop`
-  (commercial door bias), but the fetch script's whitelist doesn't include them yet.
-  Same for `historic` if we ever distinguish landmarks. Add to the whitelist before
-  re-fetching if you want those distinctions.
+- **Tag coverage**: `historic` isn't whitelisted yet. Add it to `KEPT_TAGS` in
+  `fetch_osm.py` and re-fetch if we ever want to distinguish landmarks/monuments.
