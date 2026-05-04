@@ -656,6 +656,46 @@ html, body {
     treesGroup.name = 'trees';
     scene.add(treesGroup);
 
+    // ============ Cars (InstancedMesh) ============
+    // One geometry, one material, MAX_CARS instance slots. Per-instance color via
+    // instanceColor, per-frame matrix updates via setMatrixAt — one draw call for
+    // the entire fleet. buildCars() repopulates _carStates and adjusts .count;
+    // unused slots beyond it just don't render.
+    //
+    // The shape is a side-profile silhouette extruded across the car width — ~30
+    // triangles per car, recognizable without wheels. Body sits ~0.2m above the
+    // road surface; the gap reads as ground clearance at typical view distances.
+    const MAX_CARS = 80;
+    const CAR_COLORS = [
+      0x3a3530,  // dark grey
+      0x1f1c1a,  // charcoal
+      0xd8cdb4,  // off-white
+      0x807870,  // light grey
+      0x5a2a28,  // burgundy
+      0x2e3a52,  // deep blue
+      0x6a6238,  // olive
+      0xd4587a,  // mexican-pink-taxi
+    ];
+    const carProfile = new THREE.Shape();
+    carProfile.moveTo(-2.0, 0);
+    carProfile.lineTo(-2.0, 1.0);   // back
+    carProfile.lineTo(-1.2, 1.0);   // back-of-cabin step up
+    carProfile.lineTo(-0.8, 1.6);   // up to roof
+    carProfile.lineTo(0.7, 1.6);    // roof
+    carProfile.lineTo(1.1, 1.0);    // down to hood
+    carProfile.lineTo(2.0, 1.0);    // hood
+    carProfile.lineTo(2.0, 0);      // front bumper
+    carProfile.lineTo(-2.0, 0);     // close along the bottom
+    const carGeometry = new THREE.ExtrudeGeometry(carProfile, { depth: 1.8, bevelEnabled: false });
+    carGeometry.translate(0, 0, -0.9);  // center along the width axis
+    const carMaterial = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    const carsInstanced = new THREE.InstancedMesh(carGeometry, carMaterial, MAX_CARS);
+    carsInstanced.castShadow = false;     // skip shadow render — multiplies cost by car count
+    carsInstanced.receiveShadow = true;   // but still receive shadows (so cars darken under buildings)
+    carsInstanced.frustumCulled = false;  // single bounding box at origin would cull the whole fleet
+    carsInstanced.count = 0;              // start hidden until buildCars() runs
+    scene.add(carsInstanced);
+
     // ============ Custom orbit controls ============
     class Orbit {
       constructor(camera, el, target) {
@@ -2040,6 +2080,135 @@ html, body {
       while (treesGroup.children.length) treesGroup.remove(treesGroup.children[0]);
     }
 
+    // ============ Cars: build + tick ============
+    // Cars only drive on streets that actually carry vehicles. Footpaths,
+    // pedestrian-only blocks, and stair-stepped pasajes are excluded.
+    const CAR_SKIP_HIGHWAYS = new Set([
+      'footway', 'path', 'steps', 'cycleway',
+      'pedestrian', 'living_street'
+    ]);
+
+    const _carStates = [];        // [{road, totalLen, dist, dir, speed, sideOffset, colorIdx}]
+    let _carEligibleRoads = [];   // pre-filtered road list, swapped on each buildCars()
+
+    // Reused scratch objects so updateCars() doesn't allocate per-frame.
+    const _carColor  = new THREE.Color();
+    const _carMatrix = new THREE.Matrix4();
+    const _carPos    = new THREE.Vector3();
+    const _carQuat   = new THREE.Quaternion();
+    const _CAR_SCL   = new THREE.Vector3(1, 1, 1);
+    const _Y_AXIS    = new THREE.Vector3(0, 1, 0);
+
+    function _carRoadLength(road) {
+      let total = 0;
+      const c = road.coords;
+      for (let i = 0; i < c.length - 1; i++) {
+        total += Math.hypot(c[i + 1].x - c[i].x, c[i + 1].z - c[i].z);
+      }
+      return total;
+    }
+
+    // Returns {x, z, angle} for a car at `dist` meters along the polyline,
+    // facing in the car's forward direction (which depends on `dir`), offset
+    // sideways onto the right lane of that forward direction.
+    function _sampleCarOnRoad(road, dist, dir, sideOffset) {
+      const coords = road.coords;
+      let acc = 0;
+      for (let i = 0; i < coords.length - 1; i++) {
+        const a = coords[i], b = coords[i + 1];
+        const dx = b.x - a.x, dz = b.z - a.z;
+        const segLen = Math.hypot(dx, dz);
+        if (segLen < 1e-6) continue;
+        if (acc + segLen >= dist) {
+          const local = dist - acc;
+          const ux = dx / segLen, uz = dz / segLen;
+          // Right of polyline forward = (uz, -ux). Cars going +dir stay there;
+          // cars going -dir are on the opposite side (right of *their* forward).
+          const sx = (dir > 0 ?  uz : -uz) * sideOffset;
+          const sz = (dir > 0 ? -ux :  ux) * sideOffset;
+          // Car +X axis must point along its forward (dir * polyline forward).
+          const fwdX = dir * ux, fwdZ = dir * uz;
+          return {
+            x: a.x + ux * local + sx,
+            z: a.z + uz * local + sz,
+            angle: Math.atan2(-fwdZ, fwdX)
+          };
+        }
+        acc += segLen;
+      }
+      // Fell off the end (rounding) — clamp to the last vertex.
+      const last = coords[coords.length - 1];
+      return { x: last.x, z: last.z, angle: 0 };
+    }
+
+    // Pick a random eligible road and place the car. atStart=true puts it at
+    // the entry edge for the chosen direction (used for respawns); false puts
+    // it at a random distance (used on initial build so cars don't all enter
+    // at once). Returns false if no road of usable length is available.
+    function _placeCarOnRandomRoad(c, atStart) {
+      if (!_carEligibleRoads.length) return false;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const road = _carEligibleRoads[Math.floor(Math.random() * _carEligibleRoads.length)];
+        const total = _carRoadLength(road);
+        if (total < 6) continue;
+        c.road = road;
+        c.totalLen = total;
+        c.dir = Math.random() < 0.5 ? 1 : -1;
+        c.speed = 4 + Math.random() * 4;          // 4–8 m/s, ~14–29 km/h
+        c.sideOffset = Math.max(0.6, roadWidth(road.tags) * 0.22);
+        c.dist = atStart ? (c.dir > 0 ? 0 : total) : Math.random() * total;
+        return true;
+      }
+      return false;
+    }
+
+    function buildCars(parsed, radius) {
+      _carEligibleRoads = parsed.roads.filter(r =>
+        r.tags.highway && !CAR_SKIP_HIGHWAYS.has(r.tags.highway) && withinRadius(r, radius)
+      );
+      _carStates.length = 0;
+      if (!_carEligibleRoads.length) {
+        carsInstanced.count = 0;
+        return;
+      }
+      // Density: ~35% of road count, clamped to [8, MAX_CARS]. Plaza Luis Cabrera
+      // at 500m has ~155 eligible roads → ~54 cars; small radii drop accordingly.
+      const targetCount = Math.min(MAX_CARS,
+        Math.max(8, Math.floor(_carEligibleRoads.length * 0.35)));
+      for (let i = 0; i < targetCount; i++) {
+        const c = { colorIdx: Math.floor(Math.random() * CAR_COLORS.length) };
+        if (!_placeCarOnRandomRoad(c, /*atStart=*/false)) continue;
+        _carStates.push(c);
+        _carColor.setHex(CAR_COLORS[c.colorIdx]);
+        carsInstanced.setColorAt(_carStates.length - 1, _carColor);
+      }
+      carsInstanced.count = _carStates.length;
+      if (carsInstanced.instanceColor) carsInstanced.instanceColor.needsUpdate = true;
+      updateCars(0);
+    }
+
+    function updateCars(dt) {
+      const n = carsInstanced.count;
+      if (n === 0) return;
+      for (let i = 0; i < n; i++) {
+        const c = _carStates[i];
+        c.dist += c.speed * c.dir * dt;
+        if (c.dist < 0 || c.dist > c.totalLen) {
+          // Drove off this road — re-enter on a fresh random road at the edge.
+          if (!_placeCarOnRandomRoad(c, /*atStart=*/true)) {
+            // No usable road right now; clamp to current bounds and keep going.
+            c.dist = Math.max(0, Math.min(c.totalLen, c.dist));
+          }
+        }
+        const s = _sampleCarOnRoad(c.road, c.dist, c.dir, c.sideOffset);
+        _carPos.set(s.x, 0.2, s.z);
+        _carQuat.setFromAxisAngle(_Y_AXIS, s.angle);
+        _carMatrix.compose(_carPos, _carQuat, _CAR_SCL);
+        carsInstanced.setMatrixAt(i, _carMatrix);
+      }
+      carsInstanced.instanceMatrix.needsUpdate = true;
+    }
+
     // ============ Parse OSM ============
     function parseOSM() {
       const nodes = new Map();
@@ -2139,6 +2308,7 @@ html, body {
       });
 
       buildTrees(parsed, radius);
+      buildCars(parsed, radius);
 
       const dist = Math.max(120, r * 1.9);
       controls.setTarget(new THREE.Vector3(0, 0, 0), dist, 0.65, Math.PI / 4);
@@ -2496,6 +2666,7 @@ html, body {
       const dt = Math.min(0.1, (now - lastFrameTime) / 1000);
       lastFrameTime = now;
       updateKeyboardCamera(dt);
+      updateCars(dt);
       renderer.render(scene, camera);
     }
     tick();

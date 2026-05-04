@@ -82,6 +82,26 @@ Whitelisted tags: `building`, `building:levels`, `building:material`, `height`,
   material pickers; overrides keyed by OSM way ID, lost on location change (intentional —
   IDs don't translate across cities).
 
+## Cars (animation)
+
+Schematic vehicles drive along the road network. The whole fleet is one
+`THREE.InstancedMesh` (one geometry, one material, per-instance color via
+`instanceColor`) — single draw call regardless of count. Geometry is a side-profile
+silhouette extruded across the car width (~30 triangles per car). No wheels; the
+body sits ~0.2m above the road and the gap reads as ground clearance.
+
+- 8 hash-picked colors (charcoal, off-white, burgundy, deep blue, olive, mexican-pink-taxi…).
+- Density: ~35% of eligible roads, capped at 80 cars (`MAX_CARS`).
+- Skip set: `footway`, `path`, `steps`, `cycleway`, `pedestrian`, `living_street`.
+- Cars drive on the right side of their forward direction (Mexican traffic).
+- Speed: 4–8 m/s per car (~14–29 km/h).
+- Respawn: when a car reaches a road's end, it picks a fresh random road and re-enters
+  at the entry edge.
+- `frustumCulled = false` on the InstancedMesh (its bounding box is single-instance and
+  centered at origin — would cull the whole fleet otherwise).
+- `castShadow = false` to avoid multiplying the shadow-map cost by car count;
+  `receiveShadow = true` so cars darken when passing under tall buildings.
+
 ## Path B landmark archetypes
 
 Tag-detected building categories that get distinctive primitive geometry on top of
