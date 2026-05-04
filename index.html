@@ -2097,6 +2097,7 @@ html, body {
 
     const _carStates = [];        // [{road, totalLen, dist, dir, speed, sideOffset, colorIdx}]
     let _carEligibleRoads = [];   // pre-filtered road list, swapped on each buildCars()
+    let _carRoadGraph = new Map(); // nodeId → [{road, endIdx}], built from _carEligibleRoads
 
     // Reused scratch objects so updateCars() doesn't allocate per-frame.
     const _carColor  = new THREE.Color();
@@ -2169,6 +2170,64 @@ html, body {
       return false;
     }
 
+    // Build a node→roads index from the eligible road list. OSM splits streets
+    // at every intersection, so a single visible avenue is many short ways
+    // joined at shared nodes. This map lets a car continue past its current
+    // way's endpoint onto a connecting way instead of teleporting to a random
+    // street mid-screen.
+    function _buildCarRoadGraph() {
+      _carRoadGraph.clear();
+      for (const road of _carEligibleRoads) {
+        const ids = road.nodeIds;
+        if (!ids || ids.length < 2) continue;
+        for (const endIdx of [0, ids.length - 1]) {
+          const nodeId = ids[endIdx];
+          let entries = _carRoadGraph.get(nodeId);
+          if (!entries) { entries = []; _carRoadGraph.set(nodeId, entries); }
+          entries.push({ road, endIdx });
+        }
+      }
+    }
+
+    // Hand the car off to a connecting road at the endpoint it just reached.
+    // If no connection exists (true cul-de-sac, or the connecting way isn't
+    // eligible for cars), the car U-turns on the same road. Speed and color
+    // are kept so each car stays an "individual" across transitions.
+    function _continueCarOrTurn(c) {
+      const atFarEnd = c.dist >= c.totalLen;
+      const ids = c.road.nodeIds;
+      if (ids && ids.length >= 2) {
+        const endIdx = atFarEnd ? ids.length - 1 : 0;
+        const nodeId = ids[endIdx];
+        const conns = _carRoadGraph.get(nodeId);
+        if (conns) {
+          // Only consider OTHER roads — same road would teleport in place.
+          let pickIdx = -1, count = 0;
+          for (let i = 0; i < conns.length; i++) {
+            if (conns[i].road !== c.road) {
+              count++;
+              if (Math.random() < 1 / count) pickIdx = i;  // reservoir sample
+            }
+          }
+          if (pickIdx >= 0) {
+            const next = conns[pickIdx];
+            c.road = next.road;
+            c.totalLen = _carRoadLength(next.road);
+            c.sideOffset = Math.max(0.6, roadWidth(next.road.tags) * 0.22);
+            // Enter from the shared node, drive away from it.
+            if (next.endIdx === 0) { c.dir = 1; c.dist = 0; }
+            else                   { c.dir = -1; c.dist = c.totalLen; }
+            return true;
+          }
+        }
+      }
+      // Dead-end: U-turn on the same road. Flip direction and clamp dist back
+      // to the endpoint so the next frame's advance walks back into the road.
+      c.dir = -c.dir;
+      c.dist = atFarEnd ? c.totalLen : 0;
+      return true;
+    }
+
     function buildCars(parsed, radius) {
       _carEligibleRoads = parsed.roads.filter(r =>
         r.tags.highway && !CAR_SKIP_HIGHWAYS.has(r.tags.highway) && withinRadius(r, radius)
@@ -2176,8 +2235,10 @@ html, body {
       _carStates.length = 0;
       if (!_carEligibleRoads.length) {
         carsInstanced.count = 0;
+        _carRoadGraph.clear();
         return;
       }
+      _buildCarRoadGraph();
       // Density: ~45% of road count, clamped to [12, MAX_CARS]. Plaza Luis Cabrera
       // at 500m has ~155 eligible roads → ~70 cars; small radii drop accordingly.
       const targetCount = Math.min(MAX_CARS,
@@ -2201,9 +2262,10 @@ html, body {
         const c = _carStates[i];
         c.dist += c.speed * c.dir * dt;
         if (c.dist < 0 || c.dist > c.totalLen) {
-          // Drove off this road — re-enter on a fresh random road at the edge.
-          if (!_placeCarOnRandomRoad(c, /*atStart=*/true)) {
-            // No usable road right now; clamp to current bounds and keep going.
+          // Reached the end of this OSM way — chain onto a connecting way at the
+          // shared intersection node. Random respawn is only the last-resort
+          // fallback (no eligible roads at all, e.g. tiny radius).
+          if (!_continueCarOrTurn(c) && !_placeCarOnRandomRoad(c, /*atStart=*/true)) {
             c.dist = Math.max(0, Math.min(c.totalLen, c.dist));
           }
         }
@@ -2234,7 +2296,9 @@ html, body {
         coords.forEach(c => { cx += c.x; cz += c.z; });
         cx /= coords.length; cz /= coords.length;
         const distFromCenter = Math.hypot(cx, cz);
-        const item = { id, coords, tags, distFromCenter, centroidX: cx, centroidZ: cz };
+        // nodeIds is a direct reference to the source array (no copy) — used by
+        // the car system to chain road segments through shared intersection nodes.
+        const item = { id, coords, nodeIds: el.n, tags, distFromCenter, centroidX: cx, centroidZ: cz };
         if (tags.building) buildings.push(item);
         else if (tags.highway) roads.push(item);
         else if (tags.leisure || tags.landuse || tags.natural === 'water') parks.push(item);
