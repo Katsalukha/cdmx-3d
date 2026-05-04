@@ -95,8 +95,12 @@ body sits ~0.2m above the road and the gap reads as ground clearance.
 - Skip set: `footway`, `path`, `steps`, `cycleway`, `pedestrian`, `living_street`.
 - Cars drive on the right side of their forward direction (Mexican traffic).
 - Speed: 4–8 m/s per car (~14–29 km/h).
-- Respawn: when a car reaches a road's end, it picks a fresh random road and re-enters
-  at the entry edge.
+- Continuation: when a car reaches the end of its OSM way, it chains onto a connecting
+  way through the shared intersection node (`_carRoadGraph`: nodeId → `[{road, endIdx}]`).
+  Without this, cars would teleport mid-screen at every block — OSM splits streets at
+  every intersection, so a single avenue is many short ways.
+- Dead-end fallback: if no connection exists, the car U-turns on the same road. Random
+  respawn is only used when there are no eligible roads at all (degenerate case).
 - `frustumCulled = false` on the InstancedMesh (its bounding box is single-instance and
   centered at origin — would cull the whole fleet otherwise).
 - `castShadow = false` to avoid multiplying the shadow-map cost by car count;
@@ -125,3 +129,15 @@ beyond cylinders. Reuse the cap material so per-building color tinting still app
   let curated color schemes survive reloads (right now overrides are in-memory only).
 - **Tag coverage**: `historic` isn't whitelisted yet. Add it to `KEPT_TAGS` in
   `fetch_osm.py` and re-fetch if we ever want to distinguish landmarks/monuments.
+
+## PR conventions
+
+- Use `- [x]` checkboxes only for things actually verified before merging (brace
+  balance, serve test, diff scope). Use plain `-` bullets for anything that needs
+  the user to look at the running site (visual smoke tests). GitHub auto-counts
+  unchecked checkboxes in the merged-PR list, and orphan `[ ]` items become
+  permanent "X of Y tasks" decoration that nobody ticks off post-merge.
+- Direct-to-main pushes are fine for tiny tweaks. PRs are preferred for
+  feature-sized changes, with one PR per logical change (don't mix refactor +
+  feature in one branch). Branch off the latest `origin/main`, not off another
+  unmerged branch.
