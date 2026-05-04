@@ -591,6 +591,17 @@ html, body {
   (() => {
     'use strict';
 
+    // ============ Module-init constants ============
+    // Hoisted to the top of the IIFE so they're initialized before any eager
+    // scene-setup code (ground mesh, lights, etc.) that might call texture
+    // helpers depending on them. Function declarations hoist; const declarations
+    // sit in the temporal dead zone until executed, so a helper like newCanvas()
+    // — which reads TEX_PX — would throw ReferenceError if called before this
+    // point. Keeping shared dimensional constants up here prevents that class
+    // of bug for future eager additions.
+    const TILE_M = 3;       // physical size in meters per facade-texture tile
+    const TEX_PX = 256;     // pixel resolution per facade-texture tile
+
     // ============ Three.js scene ============
     const canvas = document.getElementById('canvas');
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -870,8 +881,7 @@ html, body {
     // ============ Procedural facade textures ============
     // All textures represent a 3m x 3m tile (one floor, one window column).
     // Texture is mostly light/desaturated so MeshLambertMaterial color tint shows through.
-    const TILE_M = 3;       // physical size in meters per texture tile
-    const TEX_PX = 256;     // pixel resolution per tile
+    // Tile dimensions (TILE_M, TEX_PX) are hoisted to the top of the IIFE.
 
     function newCanvas() {
       const c = document.createElement('canvas');
@@ -879,8 +889,11 @@ html, body {
       return c;
     }
 
+    // Size-aware: reads dims from ctx.canvas so callers using a non-TEX_PX canvas
+    // (e.g. the sidewalk ground texture) work without an extra parameter.
     function applyNoise(ctx, intensity) {
-      const img = ctx.getImageData(0, 0, TEX_PX, TEX_PX);
+      const w = ctx.canvas.width, h = ctx.canvas.height;
+      const img = ctx.getImageData(0, 0, w, h);
       const d = img.data;
       for (let i = 0; i < d.length; i += 4) {
         const n = (Math.random() - 0.5) * intensity;
@@ -1137,18 +1150,7 @@ html, body {
       // Base concrete tone — warm grey, sits between the bone palette and a true concrete.
       ctx.fillStyle = '#bcb09a';
       ctx.fillRect(0, 0, SIZE, SIZE);
-      // Noise grain — inlined rather than calling applyNoise(), because that helper
-      // reads TEX_PX (a const declared further down in the IIFE) and this function
-      // runs eagerly during ground-mesh setup, before that const is initialized.
-      const img = ctx.getImageData(0, 0, SIZE, SIZE);
-      const d = img.data;
-      for (let i = 0; i < d.length; i += 4) {
-        const n = (Math.random() - 0.5) * 22;
-        d[i]   = Math.max(0, Math.min(255, d[i]   + n));
-        d[i+1] = Math.max(0, Math.min(255, d[i+1] + n));
-        d[i+2] = Math.max(0, Math.min(255, d[i+2] + n));
-      }
-      ctx.putImageData(img, 0, 0);
+      applyNoise(ctx, 22);
 
       // Darker discoloration patches — water stains, oil, age.
       for (let i = 0; i < 6; i++) {
@@ -1727,8 +1729,9 @@ html, body {
           }
         }
 
-        // Rooftop tinaco — only on plain buildings (every archetype above replaces the
-        // tinaco with its own roof feature, so the !archetype guard skips them all).
+        // Rooftop tinaco — only on plain buildings. Religious / hospital / school /
+        // civic each have their own roof feature; retail's awning is wall-mounted but
+        // a shop with a tinaco above just looks busy. The !archetype guard skips all.
         if (!archetype && (area === undefined || area >= 25) && height >= 4) {
           const offX = (hash2(id, 11) - 0.5) * 1.6;
           const offZ = (hash2(id, 13) - 0.5) * 1.6;
