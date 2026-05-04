@@ -2539,10 +2539,15 @@ out skel qt;`;
       return await r.json();
     }
 
-    function slimOSMData(data, lat, lon) {
+    // Build a runtime payload from raw Overpass output. Mirrors the on-disk schema
+    // produced by scripts/fetch_osm.py — same keys, same tag whitelist — so the
+    // viewer can consume a live-fetched payload and a pre-baked data/<slug>.json
+    // through the same applyParsedDataset() path.
+    function slimOSMData(data, lat, lon, radius, name, secondary) {
       const RELEVANT = new Set([
         'building', 'building:material', 'building:levels', 'height',
-        'highway', 'leisure', 'landuse', 'natural', 'amenity', 'tourism'
+        'highway', 'leisure', 'landuse', 'natural', 'amenity',
+        'name', 'shop', 'tourism'
       ]);
       const elements = [];
       const usedNodes = new Set();
@@ -2564,7 +2569,7 @@ out skel qt;`;
           elements.push({ t: 'n', i: el.id, lat: +el.lat.toFixed(7), lon: +el.lon.toFixed(7) });
         }
       }
-      return { e: elements, c: [lat, lon] };
+      return { c: [lat, lon], r: radius, name, secondary, e: elements };
     }
 
     function setStatus(text, kind) {
@@ -2590,6 +2595,10 @@ out skel qt;`;
     }
 
     let isLoading = false;
+    // Live-fetched radius for typed addresses. Generous enough that the slider can
+    // filter without re-fetching; matches what fetch_osm.py would write to disk.
+    const LIVE_FETCH_RADIUS = 350;
+
     async function loadLocation(query) {
       if (isLoading) return;
       isLoading = true;
@@ -2599,43 +2608,20 @@ out skel qt;`;
         const place = await geocode(query);
 
         setStatus('↳ descargando trazado…');
-        // Fetch a generous radius (350m) so the slider can filter without re-fetching
-        const data = await fetchOverpass(place.lat, place.lon, 350);
+        const data = await fetchOverpass(place.lat, place.lon, LIVE_FETCH_RADIUS);
 
         setStatus('↳ construyendo modelo…');
         // Yield to the browser so the status text actually paints
         await new Promise(r => setTimeout(r, 16));
 
-        OSM_DATA = slimOSMData(data, place.lat, place.lon);
-        setCenter(OSM_DATA.c[0], OSM_DATA.c[1]);
-        PARSED = parseOSM();
-
-        // Reset overrides — they're keyed by OSM ID and would map weirdly across cities
-        buildingColors.clear();
-        buildingMaterials.clear();
-        if ($inspector) $inspector.classList.add('hidden');
-        if ($controlsHint) $controlsHint.style.opacity = '';
-
-        // Update name display
         const nice = nicifyAddress(place);
-        $titleText.textContent = nice.primary;
-        $locationLine.textContent = nice.secondary;
-
-        render(parseInt($radInput.value, 10));
-
-        const bcount = PARSED.buildings.length;
-        setStatus('✓ ' + bcount + ' edificios cargados', 'ok');
-        setTimeout(() => { if ($status.textContent.startsWith('✓')) setStatus(''); }, 3500);
+        applyParsedDataset(slimOSMData(
+          data, place.lat, place.lon,
+          LIVE_FETCH_RADIUS, nice.primary, nice.secondary
+        ));
       } catch (e) {
         console.error('loadLocation failed:', e);
-        let msg = e.message || String(e);
-        const isNetErr = e.name === 'TypeError' || /failed to fetch|networkerror|load failed/i.test(msg);
-        if (isNetErr) {
-          // file:// origin is restricted in some browsers / blocked by some extensions.
-          // Running a local HTTP server bypasses all of that.
-          msg = 'fetch bloqueado · prueba `python3 -m http.server` en esta carpeta y abre http://localhost:8000';
-        }
-        setStatus('✕ ' + msg, 'error');
+        setStatus('✕ ' + fetchErrorMessage(e, e.message || String(e)), 'error');
       } finally {
         isLoading = false;
         $searchBtn.disabled = false;
@@ -2672,9 +2658,56 @@ out skel qt;`;
       }
     }
 
-    function fmtCoord(n, suffix) {
+    function fmtCoord(n) {
       const v = Math.abs(n).toFixed(5);
       return (n < 0 ? '−' : '') + v + '°';
+    }
+
+    // Single entry point for swapping the active dataset. Both the dropdown loader
+    // (loadDataset) and the live geocode loader (loadLocation) build a payload in
+    // the on-disk schema shape, then hand it here. Centralizing the state reset +
+    // UI update means future fields (a new info-panel readout, a different
+    // override-clear policy, etc.) need to change in exactly one place.
+    function applyParsedDataset(payload) {
+      OSM_DATA = payload;
+      setCenter(payload.c[0], payload.c[1]);
+      PARSED = parseOSM();
+
+      // Reset overrides — keyed by OSM ID, would map weirdly across cities.
+      buildingColors.clear();
+      buildingMaterials.clear();
+      $inspector.classList.add('hidden');
+      $controlsHint.style.opacity = '';
+      selectedId = null;
+
+      if (payload.name) setTitle(payload.name);
+      if (payload.secondary) $locationLine.textContent = payload.secondary;
+      $latVal.textContent = fmtCoord(payload.c[0]);
+      $lonVal.textContent = fmtCoord(payload.c[1]);
+
+      // Cap the slider at the dataset's fetched radius so users can't ask for
+      // data we don't have. Snap the current value down if needed.
+      if (payload.r) {
+        $radInput.max = payload.r;
+        if (parseInt($radInput.value, 10) > payload.r) {
+          $radInput.value = payload.r;
+          $radDisplay.textContent = payload.r + 'm';
+        }
+      }
+
+      render(parseInt($radInput.value, 10));
+      setStatus('✓ ' + PARSED.buildings.length + ' edificios', 'ok');
+      setTimeout(() => { if ($status.textContent.startsWith('✓')) setStatus(''); }, 2500);
+    }
+
+    // Shared error-message helper: file:// origin, blocked extensions, and
+    // hosts-file shenanigans all surface as TypeError or "failed to fetch" —
+    // tell the user how to fix it instead of just showing the raw error.
+    function fetchErrorMessage(err, fallback) {
+      const m = err && (err.message || String(err)) || '';
+      const isNet = (err && err.name === 'TypeError') || /failed to fetch|networkerror|load failed/i.test(m);
+      if (isNet) return 'fetch bloqueado · ejecuta `python3 -m http.server` y abre http://localhost:8000';
+      return fallback + ' (' + m + ')';
     }
 
     async function loadDataset(slug, { silent = false } = {}) {
@@ -2682,43 +2715,10 @@ out skel qt;`;
         if (!silent) setStatus('↳ cargando ' + slug + '…');
         const r = await fetch('data/' + encodeURIComponent(slug) + '.json');
         if (!r.ok) throw new Error('HTTP ' + r.status);
-        const payload = await r.json();
-        OSM_DATA = payload;
-        setCenter(payload.c[0], payload.c[1]);
-        PARSED = parseOSM();
-
-        // Reset overrides — keyed by OSM ID, would map weirdly across cities.
-        buildingColors.clear();
-        buildingMaterials.clear();
-        if ($inspector) $inspector.classList.add('hidden');
-        if ($controlsHint) $controlsHint.style.opacity = '';
-        selectedId = null;
-
-        if (payload.name) setTitle(payload.name);
-        if (payload.secondary) $locationLine.textContent = payload.secondary;
-        $latVal.textContent = fmtCoord(payload.c[0]);
-        $lonVal.textContent = fmtCoord(payload.c[1]);
-
-        // Cap the slider at the dataset's fetched radius so users can't ask for
-        // data we don't have. Snap the current value down if needed.
-        if (payload.r) {
-          $radInput.max = payload.r;
-          if (parseInt($radInput.value, 10) > payload.r) {
-            $radInput.value = payload.r;
-            $radDisplay.textContent = payload.r + 'm';
-          }
-        }
-
-        render(parseInt($radInput.value, 10));
-        setStatus('✓ ' + PARSED.buildings.length + ' edificios', 'ok');
-        setTimeout(() => { if ($status.textContent.startsWith('✓')) setStatus(''); }, 2500);
+        applyParsedDataset(await r.json());
       } catch (e) {
         console.error('loadDataset failed:', e);
-        const isNet = e.name === 'TypeError' || /failed to fetch|networkerror|load failed/i.test(e.message || '');
-        const msg = isNet
-          ? 'fetch bloqueado · ejecuta `python3 -m http.server` y abre http://localhost:8000'
-          : 'no se pudo cargar ' + slug + ' (' + (e.message || e) + ')';
-        setStatus('✕ ' + msg, 'error');
+        setStatus('✕ ' + fetchErrorMessage(e, 'no se pudo cargar ' + slug), 'error');
       }
     }
 
